@@ -43,7 +43,13 @@ import io.grpc.StatusException;
 import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.Function;
 
 public class ContentAddressableStorageService
@@ -74,14 +80,35 @@ public class ContentAddressableStorageService
       FindMissingBlobsRequest request, StreamObserver<FindMissingBlobsResponse> responseObserver) {
     FindMissingBlobsResponse.Builder responseBuilder = FindMissingBlobsResponse.newBuilder();
     try {
+      ExecutorService exec = Executors.newFixedThreadPool(20);
+      List<Callable<build.bazel.remote.execution.v2.Digest>> tasks =
+          new ArrayList<Callable<build.bazel.remote.execution.v2.Digest>>();
+
       for (build.bazel.remote.execution.v2.Digest blobDigest : request.getBlobDigestsList()) {
-        if (!simpleBlobStore.containsKey(key(blobDigest, request.getDigestFunction()))) {
+        Callable<build.bazel.remote.execution.v2.Digest> c =
+            new Callable<build.bazel.remote.execution.v2.Digest>() {
+              @Override
+              public build.bazel.remote.execution.v2.Digest call()
+                  throws IOException, InterruptedException {
+                if (!simpleBlobStore.containsKey(key(blobDigest, request.getDigestFunction()))) {
+                  return blobDigest;
+                }
+                return null;
+              }
+            };
+        tasks.add(c);
+      }
+
+      for (Future<build.bazel.remote.execution.v2.Digest> fr : exec.invokeAll(tasks)) {
+        build.bazel.remote.execution.v2.Digest blobDigest = fr.get();
+        if (blobDigest != null) {
           responseBuilder.addMissingBlobDigests(blobDigest);
         }
       }
+
       responseObserver.onNext(responseBuilder.build());
       responseObserver.onCompleted();
-    } catch (IOException e) {
+    } catch (ExecutionException e) {
       responseObserver.onError(Status.fromThrowable(e).asException());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
